@@ -4,9 +4,8 @@
 // Required for panic handler
 extern crate flipperzero_rt;
 
-use core::borrow::BorrowMut;
 use core::ffi::{c_char, c_void};
-use core::mem::size_of;
+use core::mem::{size_of, MaybeUninit};
 use core::ptr;
 
 use flipperzero_rt::{entry, manifest};
@@ -18,6 +17,13 @@ const RECORD_NOTIFICATION: *const c_char = sys::c_string!("notification");
 manifest!(name = "Haxor");
 entry!(main);
 
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct Event {
+    pub tick: u8,
+    pub input: *mut sys::InputEvent,
+}
+
 pub extern "C" fn draw_callback(canvas: *mut sys::Canvas, _context: *mut c_void) {
     unsafe {
         sys::canvas_clear(canvas);
@@ -27,25 +33,33 @@ pub extern "C" fn draw_callback(canvas: *mut sys::Canvas, _context: *mut c_void)
 }
 
 pub extern "C" fn input_callback(input_event: *mut sys::InputEvent, ctx: *mut c_void) {
+    let event_queue = ctx as *mut sys::FuriMessageQueue;
+    let event = &Event {
+        tick: 0,
+        input: input_event,
+    } as *const Event;
+
     unsafe {
-        let event_queue = ctx as *mut sys::FuriMessageQueue;
-        sys::furi_message_queue_put(event_queue, input_event as *mut c_void, u32::MAX);
+        sys::furi_message_queue_put(event_queue, event as *const c_void, u32::MAX);
     }
 }
 
-pub extern "C" fn timer_callback(_event_queue: *mut sys::FuriMessageQueue) {}
+pub extern "C" fn timer_callback(event_queue: *mut sys::FuriMessageQueue) {
+    let event = &Event {
+        tick: 1,
+        input: ptr::null_mut(),
+    } as *const Event;
+
+    unsafe {
+        sys::furi_message_queue_put(event_queue, event as *const c_void, u32::MAX);
+    }
+}
 
 fn main(_args: *mut u8) -> i32 {
+    let mut msg = MaybeUninit::<Event>::uninit();
+
     unsafe {
-        let event: *mut sys::InputEvent = sys::InputEvent {
-            type_: 0,
-            key: 0,
-            sequence: 0,
-        }
-        .borrow_mut();
-
-        let event_queue = sys::furi_message_queue_alloc(8, size_of::<sys::InputEvent>() as u32);
-
+        let event_queue = sys::furi_message_queue_alloc(8, size_of::<Event>() as u32);
         let view_port = sys::view_port_alloc();
         sys::view_port_draw_callback_set(view_port, Some(draw_callback), ptr::null_mut());
         sys::view_port_input_callback_set(view_port, Some(input_callback), event_queue);
@@ -64,13 +78,19 @@ fn main(_args: *mut u8) -> i32 {
         sys::notification_message(notifications, &sys::sequence_display_backlight_on);
 
         'input_loop: loop {
-            let ok = sys::furi_message_queue_get(event_queue, event as *mut c_void, u32::MAX);
+            let ok =
+                sys::furi_message_queue_get(event_queue, msg.as_mut_ptr() as *mut c_void, u32::MAX);
             if ok != sys::FuriStatus_FuriStatusOk {
                 break;
             }
 
-            let ev = &*event;
-            match ev.key {
+            let event = msg.assume_init();
+            if event.tick == 1 {
+                sys::notification_message(notifications, &sys::sequence_blink_green_100);
+                continue;
+            }
+
+            match (*event.input).key {
                 sys::InputKey_InputKeyBack => {
                     break 'input_loop;
                 }
